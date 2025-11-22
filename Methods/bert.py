@@ -1,54 +1,69 @@
 import pandas as pd
-import torch
-from torch.utils.data import Dataset, DataLoader
-from transformers import BertTokenizer, BertForSequenceClassification, AdamW
+import numpy as np
+from datasets import Dataset
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    TrainingArguments,
+    Trainer,
+    DataCollatorWithPadding
+)
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from tqdm import tqdm
-import numpy as np
 import wandb
+import json
+import os
+from dotenv import load_dotenv
 
-# Configuration
+# Load environment variables
+load_dotenv()
+
+# Configuration from .env
 config = {
-    'model_name': 'bert-base-uncased',
-    'batch_size': 16,
-    'learning_rate': 2e-5,
-    'num_epochs': 3,
-    'max_length': 512,
-    'test_size': 0.2,
-    'random_state': 42
+    'model_name': os.getenv('MODEL_NAME', 'bert-base-uncased'),
+    'batch_size': int(os.getenv('BERT_BATCH_SIZE', 16)),
+    'learning_rate': float(os.getenv('BERT_LEARNING_RATE', 2e-5)),
+    'num_epochs': int(os.getenv('BERT_NUM_EPOCHS', 3)),
+    'max_length': int(os.getenv('MAX_LENGTH', 512)),
+    'test_size': float(os.getenv('TEST_SIZE', 0.2)),
+    'random_state': int(os.getenv('RANDOM_STATE', 42)),
+    'weight_decay': float(os.getenv('BERT_WEIGHT_DECAY', 0.01))
 }
+
+# File paths from .env
+prompts_file = os.getenv('PROMPTS_FILE', '../prompts.csv')
+results_file = os.getenv('RESULTS_FILE', '../results.csv')
+model_path = os.getenv('BERT_MODEL_PATH', './bert_finetuned_model')
+results_dir = os.getenv('BERT_RESULTS_DIR', './results')
+logs_dir = os.getenv('BERT_LOGS_DIR', './logs')
+summary_file = os.getenv('BERT_SUMMARY_FILE', './training_summary.json')
+wandb_project = os.getenv('WANDB_PROJECT', 'bert-prompt-correctness')
 
 # Initialize wandb
 wandb.init(
-    project="bert-prompt-correctness",
+    project=wandb_project,
     config=config,
     name="bert-base-finetuning"
 )
 
-# Set device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}")
-wandb.config.update({'device': str(device)})
-
-# Load data
+# Load and merge data
 print("Loading data...")
-prompts_df = pd.read_csv('../prompts.csv')
-results_df = pd.read_csv('../results.csv')
+print(f"Prompts file: {prompts_file}")
+print(f"Results file: {results_file}")
+prompts_df = pd.read_csv(prompts_file)
+results_df = pd.read_csv(results_file)
 
-# Merge datasets on prompt_id and id
 print("Merging datasets...")
 data = results_df.merge(prompts_df, left_on='prompt_id', right_on='id', suffixes=('_result', '_prompt'))
 
-# Create features and labels
-# Use the prompt text as input and correct (True/False) as label
+# Prepare data
 X = data['prompt'].values
-y = data['correct'].values.astype(int)  # Convert True/False to 1/0
+y = data['correct'].values.astype(int)
 
 print(f"Total samples: {len(X)}")
 print(f"Positive samples: {sum(y)}, Negative samples: {len(y) - sum(y)}")
 
-# Log dataset statistics to wandb
+# Log dataset statistics
 wandb.log({
     'total_samples': len(X),
     'positive_samples': int(sum(y)),
@@ -56,248 +71,189 @@ wandb.log({
     'class_balance': sum(y) / len(y)
 })
 
-# Split data into train and validation sets
-X_train, X_val, y_train, y_val = train_test_split(
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(
     X, y,
     test_size=config['test_size'],
     random_state=config['random_state'],
     stratify=y
 )
 
-print(f"Training samples: {len(X_train)}, Validation samples: {len(X_val)}")
+# Further split train into train and validation
+X_train, X_val, y_train, y_val = train_test_split(
+    X_train, y_train,
+    test_size=0.1,
+    random_state=config['random_state'],
+    stratify=y_train
+)
 
-# Initialize BERT tokenizer and model
-print("Loading BERT model and tokenizer...")
-tokenizer = BertTokenizer.from_pretrained(config['model_name'])
-model = BertForSequenceClassification.from_pretrained(config['model_name'], num_labels=2)
-model.to(device)
+print(f"Training samples: {len(X_train)}")
+print(f"Validation samples: {len(X_val)}")
+print(f"Test samples: {len(X_test)}")
 
-# Watch model with wandb
-wandb.watch(model, log='all', log_freq=10)
+# Create HuggingFace datasets
+train_dataset = Dataset.from_dict({'text': X_train, 'label': y_train})
+val_dataset = Dataset.from_dict({'text': X_val, 'label': y_val})
+test_dataset = Dataset.from_dict({'text': X_test, 'label': y_test})
 
-# Create custom dataset class
-class PromptDataset(Dataset):
-    def __init__(self, texts, labels, tokenizer, max_length=None):
-        if max_length is None:
-            max_length = config['max_length']
-        self.texts = texts
-        self.labels = labels
-        self.tokenizer = tokenizer
-        self.max_length = max_length
+# Load tokenizer and model
+print("\nLoading BERT model and tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained(config['model_name'])
+model = AutoModelForSequenceClassification.from_pretrained(config['model_name'], num_labels=2)
 
-    def __len__(self):
-        return len(self.texts)
+# Tokenize datasets
+def tokenize_function(examples):
+    return tokenizer(examples['text'], truncation=True, max_length=config['max_length'])
 
-    def __getitem__(self, idx):
-        text = str(self.texts[idx])
-        label = self.labels[idx]
+train_dataset = train_dataset.map(tokenize_function, batched=True)
+val_dataset = val_dataset.map(tokenize_function, batched=True)
+test_dataset = test_dataset.map(tokenize_function, batched=True)
 
-        encoding = self.tokenizer.encode_plus(
-            text,
-            add_special_tokens=True,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_attention_mask=True,
-            return_tensors='pt'
-        )
+# Data collator for dynamic padding
+data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
-        return {
-            'input_ids': encoding['input_ids'].flatten(),
-            'attention_mask': encoding['attention_mask'].flatten(),
-            'label': torch.tensor(label, dtype=torch.long)
+# Define metrics
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    predictions = np.argmax(logits, axis=-1)
+
+    accuracy = accuracy_score(labels, predictions)
+    precision, recall, f1, _ = precision_recall_fscore_support(labels, predictions, average='binary')
+
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1
+    }
+
+# Training arguments
+training_args = TrainingArguments(
+    output_dir=results_dir,
+    eval_strategy='epoch',
+    save_strategy='epoch',
+    learning_rate=config['learning_rate'],
+    per_device_train_batch_size=config['batch_size'],
+    per_device_eval_batch_size=config['batch_size'],
+    num_train_epochs=config['num_epochs'],
+    weight_decay=config['weight_decay'],
+    load_best_model_at_end=True,
+    metric_for_best_model='f1',
+    logging_dir=logs_dir,
+    logging_steps=10,
+    report_to='wandb',
+    run_name='bert-base-finetuning'
+)
+
+# Initialize Trainer
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset,
+    tokenizer=tokenizer,
+    data_collator=data_collator,
+    compute_metrics=compute_metrics
+)
+
+# Train model
+print("\nStarting training...")
+train_result = trainer.train()
+
+# Save model
+print("\nSaving model...")
+trainer.save_model(model_path)
+tokenizer.save_pretrained(model_path)
+
+# Evaluate on test set
+print("\nEvaluating on test set...")
+test_results = trainer.evaluate(test_dataset)
+
+# Get training history
+train_history = trainer.state.log_history
+
+# Extract final metrics
+final_train_metrics = {}
+final_val_metrics = {}
+
+for log in reversed(train_history):
+    if 'eval_loss' in log and not final_val_metrics:
+        final_val_metrics = {
+            'loss': log.get('eval_loss'),
+            'accuracy': log.get('eval_accuracy'),
+            'precision': log.get('eval_precision'),
+            'recall': log.get('eval_recall'),
+            'f1': log.get('eval_f1')
+        }
+    if 'loss' in log and 'eval_loss' not in log and not final_train_metrics:
+        final_train_metrics = {
+            'loss': log.get('loss')
         }
 
-# Create datasets and dataloaders
-train_dataset = PromptDataset(X_train, y_train, tokenizer)
-val_dataset = PromptDataset(X_val, y_val, tokenizer)
+# Create comprehensive JSON summary
+summary = {
+    'model_configuration': {
+        'model_name': config['model_name'],
+        'num_labels': 2,
+        'max_length': config['max_length']
+    },
+    'training_configuration': {
+        'learning_rate': config['learning_rate'],
+        'batch_size': config['batch_size'],
+        'num_epochs': config['num_epochs'],
+        'optimizer': 'AdamW',
+        'weight_decay': config['weight_decay']
+    },
+    'dataset_statistics': {
+        'total_samples': len(X),
+        'train_samples': len(X_train),
+        'validation_samples': len(X_val),
+        'test_samples': len(X_test),
+        'positive_samples': int(sum(y)),
+        'negative_samples': int(len(y) - sum(y)),
+        'class_balance': float(sum(y) / len(y))
+    },
+    'training_results': {
+        'final_train_loss': float(final_train_metrics.get('loss', 0)) if final_train_metrics else None,
+        'final_validation_metrics': {
+            'loss': float(final_val_metrics.get('loss', 0)) if final_val_metrics else None,
+            'accuracy': float(final_val_metrics.get('accuracy', 0)) if final_val_metrics else None,
+            'precision': float(final_val_metrics.get('precision', 0)) if final_val_metrics else None,
+            'recall': float(final_val_metrics.get('recall', 0)) if final_val_metrics else None,
+            'f1': float(final_val_metrics.get('f1', 0)) if final_val_metrics else None
+        }
+    },
+    'test_results': {
+        'loss': float(test_results.get('eval_loss', 0)),
+        'accuracy': float(test_results.get('eval_accuracy', 0)),
+        'precision': float(test_results.get('eval_precision', 0)),
+        'recall': float(test_results.get('eval_recall', 0)),
+        'f1': float(test_results.get('eval_f1', 0))
+    },
+    'model_path': model_path
+}
 
-train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
+# Print JSON summary
+print("\n" + "="*70)
+print("TRAINING SUMMARY (JSON)")
+print("="*70)
+print(json.dumps(summary, indent=2))
 
-# Training setup
-optimizer = AdamW(model.parameters(), lr=config['learning_rate'])
-num_epochs = config['num_epochs']
+# Save JSON to file
+with open(summary_file, 'w') as f:
+    json.dump(summary, f, indent=2)
 
-print(f"\nStarting training for {num_epochs} epochs...")
+print(f"\nSummary saved to '{summary_file}'")
 
-# Training loop
-global_step = 0
-for epoch in range(num_epochs):
-    print(f"\n{'='*50}")
-    print(f"Epoch {epoch + 1}/{num_epochs}")
-    print(f"{'='*50}")
-
-    # Training phase
-    model.train()
-    train_loss = 0
-    train_preds = []
-    train_labels = []
-
-    progress_bar = tqdm(train_loader, desc='Training')
-    for batch in progress_bar:
-        # Move batch to device
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        labels = batch['label'].to(device)
-
-        # Forward pass
-        optimizer.zero_grad()
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        loss = outputs.loss
-        logits = outputs.logits
-
-        # Backward pass
-        loss.backward()
-        optimizer.step()
-
-        # Track metrics
-        train_loss += loss.item()
-        preds = torch.argmax(logits, dim=1).cpu().numpy()
-        train_preds.extend(preds)
-        train_labels.extend(labels.cpu().numpy())
-
-        # Log batch metrics to wandb
-        wandb.log({
-            'batch_loss': loss.item(),
-            'global_step': global_step,
-            'epoch': epoch + 1
-        })
-        global_step += 1
-
-        progress_bar.set_postfix({'loss': loss.item()})
-
-    # Calculate training metrics
-    avg_train_loss = train_loss / len(train_loader)
-    train_accuracy = accuracy_score(train_labels, train_preds)
-    train_precision, train_recall, train_f1, _ = precision_recall_fscore_support(
-        train_labels, train_preds, average='binary'
-    )
-
-    print(f"\nTraining Loss: {avg_train_loss:.4f}")
-    print(f"Training Accuracy: {train_accuracy:.4f}")
-
-    # Validation phase
-    model.eval()
-    val_loss = 0
-    val_preds = []
-    val_labels = []
-
-    with torch.no_grad():
-        progress_bar = tqdm(val_loader, desc='Validation')
-        for batch in progress_bar:
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['label'].to(device)
-
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss
-            logits = outputs.logits
-
-            val_loss += loss.item()
-            preds = torch.argmax(logits, dim=1).cpu().numpy()
-            val_preds.extend(preds)
-            val_labels.extend(labels.cpu().numpy())
-
-    # Calculate validation metrics
-    avg_val_loss = val_loss / len(val_loader)
-    val_accuracy = accuracy_score(val_labels, val_preds)
-    val_precision, val_recall, val_f1, _ = precision_recall_fscore_support(val_labels, val_preds, average='binary')
-
-    print(f"\nValidation Loss: {avg_val_loss:.4f}")
-    print(f"Validation Accuracy: {val_accuracy:.4f}")
-    print(f"Validation Precision: {val_precision:.4f}")
-    print(f"Validation Recall: {val_recall:.4f}")
-    print(f"Validation F1 Score: {val_f1:.4f}")
-
-    # Log epoch metrics to wandb
-    wandb.log({
-        'epoch': epoch + 1,
-        'train/loss': avg_train_loss,
-        'train/accuracy': train_accuracy,
-        'train/precision': train_precision,
-        'train/recall': train_recall,
-        'train/f1': train_f1,
-        'val/loss': avg_val_loss,
-        'val/accuracy': val_accuracy,
-        'val/precision': val_precision,
-        'val/recall': val_recall,
-        'val/f1': val_f1
-    })
-
-# Save the model
-print("\nSaving model...")
-model.save_pretrained('./bert_finetuned_model')
-tokenizer.save_pretrained('./bert_finetuned_model')
-print("Model saved to './bert_finetuned_model'")
+# Log summary to wandb
+wandb.log({"final_summary": summary})
 
 # Save model as wandb artifact
 artifact = wandb.Artifact('bert-finetuned-model', type='model')
-artifact.add_dir('./bert_finetuned_model')
+artifact.add_dir(model_path)
 wandb.log_artifact(artifact)
-
-# Function to predict on new prompts
-def predict(text, model, tokenizer, device):
-    """
-    Predict whether a response will be correct given a prompt.
-
-    Args:
-        text: The prompt text
-        model: Trained BERT model
-        tokenizer: BERT tokenizer
-        device: torch device
-
-    Returns:
-        prediction: 0 (incorrect) or 1 (correct)
-        probability: confidence score
-    """
-    model.eval()
-
-    encoding = tokenizer.encode_plus(
-        text,
-        add_special_tokens=True,
-        max_length=512,
-        padding='max_length',
-        truncation=True,
-        return_attention_mask=True,
-        return_tensors='pt'
-    )
-
-    input_ids = encoding['input_ids'].to(device)
-    attention_mask = encoding['attention_mask'].to(device)
-
-    with torch.no_grad():
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        logits = outputs.logits
-        probabilities = torch.softmax(logits, dim=1)
-        prediction = torch.argmax(probabilities, dim=1).item()
-        confidence = probabilities[0][prediction].item()
-
-    return prediction, confidence
-
-# Example usage
-print("\n" + "="*50)
-print("Example predictions:")
-print("="*50)
-
-sample_prompts = X_val[:3]
-example_table = wandb.Table(columns=["Prompt (truncated)", "Predicted", "Confidence", "Actual", "Match"])
-for i, prompt in enumerate(sample_prompts):
-    pred, conf = predict(prompt, model, tokenizer, device)
-    actual = y_val[i]
-    print(f"\nPrompt {i+1} (truncated): {prompt[:100]}...")
-    print(f"Predicted: {'Correct' if pred == 1 else 'Incorrect'} (confidence: {conf:.4f})")
-    print(f"Actual: {'Correct' if actual == 1 else 'Incorrect'}")
-
-    example_table.add_data(
-        prompt[:100] + "...",
-        'Correct' if pred == 1 else 'Incorrect',
-        f"{conf:.4f}",
-        'Correct' if actual == 1 else 'Incorrect',
-        pred == actual
-    )
-
-wandb.log({"example_predictions": example_table})
 
 # Finish wandb run
 wandb.finish()
+
+print("\nTraining complete!")
