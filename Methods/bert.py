@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import torch
 from datasets import Dataset
 from transformers import (
     AutoTokenizer,
@@ -17,6 +18,23 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+# Check GPU availability
+print("=" * 70)
+print("DEVICE INFORMATION")
+print("=" * 70)
+print(f"PyTorch version: {torch.__version__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"CUDA version: {torch.version.cuda}")
+    print(f"Number of GPUs: {torch.cuda.device_count()}")
+    print(f"Current GPU: {torch.cuda.current_device()}")
+    print(f"GPU Name: {torch.cuda.get_device_name(0)}")
+    print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+else:
+    print("WARNING: Running on CPU - this will be very slow!")
+print("=" * 70)
+print()
 
 # Configuration from .env
 config = {
@@ -151,7 +169,7 @@ trainer = Trainer(
     args=training_args,
     train_dataset=train_dataset,
     eval_dataset=val_dataset,
-    tokenizer=tokenizer,
+    processing_class=tokenizer,  # Use processing_class instead of tokenizer to avoid deprecation warning
     data_collator=data_collator,
     compute_metrics=compute_metrics
 )
