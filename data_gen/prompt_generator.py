@@ -148,7 +148,7 @@ LLM output for 2 alternatives (starts in the next line):
 
     def _get_llm(self, model_path: str, n_ctx: int = 4096, n_gpu_layers: int = -1, seed: int = 0, verbose: bool = False) -> Llama:
         """
-        Lazy-init a single Llama instance. n_gpu_layers=-1 => offload all to GPU (CUDA build).
+        Lazy-init a single LLM instance. n_gpu_layers=-1 => offload all to GPU (CUDA build).
         """
         if self.llm_singleton is None:
             # self.llm_singleton = Llama(
