@@ -53,8 +53,6 @@ build/
 *.bcf
 *.pyg
 
-*.csv
-
 *.zip
 
 .env
