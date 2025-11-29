@@ -56,3 +56,5 @@ build/
 *.zip
 
 .env
+*.csv
+!data_gen/*
