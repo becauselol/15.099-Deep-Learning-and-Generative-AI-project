@@ -30,6 +30,9 @@ plots_dir = os.path.join(output_dir, "plots")
 os.makedirs(csv_dir, exist_ok=True)
 os.makedirs(plots_dir, exist_ok=True)
 
+# Save high-level dataset statistics to JSON (will be updated after accuracy calculation)
+import json
+
 # ============================================================================
 # 1. OVERALL ACCURACY ANALYSIS
 # ============================================================================
@@ -65,6 +68,24 @@ accuracy_stats = pd.DataFrame({
 accuracy_csv = os.path.join(csv_dir, "overall_accuracy.csv")
 accuracy_stats.to_csv(accuracy_csv, index=False)
 print(f"\n✓ Saved to: {accuracy_csv}")
+
+# Save high-level dataset statistics to JSON
+dataset_stats = {
+    "dataset_name": "Countdown Results",
+    "total_results": int(len(df_results)),
+    "total_attempts": int(total_attempts),
+    "correct_attempts": int(correct_attempts),
+    "incorrect_attempts": int(incorrect_attempts),
+    "overall_accuracy_pct": float(accuracy),
+    "unique_prompts": int(df_results['prompt_id'].nunique()),
+    "unique_instances": int(df_results['instance_id'].nunique()),
+    "instances_with_features": int(len(df_features)),
+    "prompts_with_features": int(len(df_prompts))
+}
+stats_json_path = os.path.join(output_dir, "dataset_stats.json")
+with open(stats_json_path, 'w') as f:
+    json.dump(dataset_stats, f, indent=2)
+print(f"✓ Dataset statistics saved to: {stats_json_path}")
 
 # ============================================================================
 # 2. ACCURACY BY PROMPT

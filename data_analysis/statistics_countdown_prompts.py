@@ -4,7 +4,7 @@ import numpy as np
 import os
 
 # Read the CSV file
-csv_path = "/home/becauselol/MIT-2025-Fall-Homework/15.099 Homework/Project/data_gen/transformed_countdown_prompts_gemini.csv"
+csv_path = "/home/becauselol/MIT-2025-Fall-Homework/15.099 Homework/Project/data_gen/countdown_prompts_gemini_transformed.csv"
 df = pd.read_csv(csv_path)
 
 # Define the feature columns (excluding id, length, and prompt)
@@ -77,6 +77,27 @@ csv_dir = os.path.join(output_dir, "csv")
 plots_dir = os.path.join(output_dir, "plots")
 os.makedirs(csv_dir, exist_ok=True)
 os.makedirs(plots_dir, exist_ok=True)
+
+# Save high-level dataset statistics to JSON
+import json
+dataset_stats = {
+    "dataset_name": "Countdown Prompts",
+    "total_prompts": int(len(df)),
+    "unique_prompt_ids": int(df['id'].nunique()),
+    "features_tracked": len(feature_columns),
+    "feature_names": feature_columns,
+    "prompt_length": {
+        "mean": float(df['length'].mean()),
+        "median": float(df['length'].median()),
+        "min": int(df['length'].min()),
+        "max": int(df['length'].max()),
+        "std": float(df['length'].std())
+    }
+}
+stats_json_path = os.path.join(output_dir, "dataset_stats.json")
+with open(stats_json_path, 'w') as f:
+    json.dump(dataset_stats, f, indent=2)
+print(f"Dataset statistics saved to: {stats_json_path}\n")
 
 # Save statistics to CSV
 stats_output_path = os.path.join(csv_dir, "feature_statistics.csv")

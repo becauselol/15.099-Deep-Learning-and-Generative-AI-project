@@ -59,3 +59,4 @@ build/
 *.csv
 *.png
 !data_gen/*
+*.json

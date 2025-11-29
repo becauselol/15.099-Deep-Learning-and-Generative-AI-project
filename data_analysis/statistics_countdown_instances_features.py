@@ -21,6 +21,32 @@ print("COUNTDOWN INSTANCES FEATURE ANALYSIS")
 print("="*80)
 print(f"\nTotal instances: {len(df)}")
 
+# Save high-level dataset statistics to JSON
+import json
+dataset_stats = {
+    "dataset_name": "Countdown Instances Features",
+    "total_instances": int(len(df)),
+    "unique_instance_ids": int(df['id'].nunique()),
+    "number_set_sizes": {
+        "3_numbers": int((df['n_numbers'] == 3).sum()),
+        "4_numbers": int((df['n_numbers'] == 4).sum())
+    },
+    "expression_depths": {
+        f"depth_{int(d)}": int(count)
+        for d, count in df['expr_depth'].value_counts().sort_index().items()
+    },
+    "target_values": {
+        "mean": float(df['target'].mean()),
+        "median": float(df['target'].median()),
+        "min": int(df['target'].min()),
+        "max": int(df['target'].max())
+    }
+}
+stats_json_path = os.path.join(output_dir, "dataset_stats.json")
+with open(stats_json_path, 'w') as f:
+    json.dump(dataset_stats, f, indent=2)
+print(f"\n✓ Dataset statistics saved to: {stats_json_path}")
+
 # ============================================================================
 # 1. STRUCTURAL FEATURES (Input-level)
 # ============================================================================
