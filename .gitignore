@@ -58,5 +58,15 @@ build/
 .env
 *.csv
 *.png
-!data_gen/*
 *.json
+
+wandb/
+*.ckpt
+*.pt
+*.pth
+*.err
+*.out
+*.txt
+*.bin
+*.safetensors
+*.pkl

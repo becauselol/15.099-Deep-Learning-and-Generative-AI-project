@@ -21,7 +21,7 @@ module load cuda/12.4.0
 
 # Activate conda environment
 echo "===== Activating conda environment ====="
-conda activate ~/conda/envs/promptenv
+conda activate ~/.conda/envs/promptenv
 
 # Sanity check: show GPU info
 echo "===== nvidia-smi ====="

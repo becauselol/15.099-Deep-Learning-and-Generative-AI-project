@@ -49,8 +49,8 @@ config = {
 }
 
 # File paths from .env
-prompts_file = os.getenv('PROMPTS_FILE', '../prompts.csv')
-results_file = os.getenv('RESULTS_FILE', '../results.csv')
+train_data_file = os.getenv('TRAIN_DATA_FILE', '../data_gen/train_countdown_results_with_prompt_gemini.csv')
+test_data_file = os.getenv('TEST_DATA_FILE', '../data_gen/test_countdown_results_with_prompt_gemini.csv')
 model_path = os.getenv('BERT_MODEL_PATH', './bert_finetuned_model')
 results_dir = os.getenv('BERT_RESULTS_DIR', './results')
 logs_dir = os.getenv('BERT_LOGS_DIR', './logs')
@@ -64,45 +64,59 @@ wandb.init(
     name="bert-base-finetuning"
 )
 
-# Load and merge data
-print("Loading data...")
-print(f"Prompts file: {prompts_file}")
-print(f"Results file: {results_file}")
-prompts_df = pd.read_csv(prompts_file)
-results_df = pd.read_csv(results_file)
+# Load train and test data
+print("Loading train data...")
+print(f"Train data file: {train_data_file}")
+train_df = pd.read_csv(train_data_file)
+print(f"Train samples: {len(train_df)}")
 
-print("Merging datasets...")
-data = results_df.merge(prompts_df, left_on='prompt_id', right_on='id', suffixes=('_result', '_prompt'))
+print("Loading test data...")
+print(f"Test data file: {test_data_file}")
+test_df = pd.read_csv(test_data_file)
+print(f"Test samples: {len(test_df)}")
 
-# Prepare data
-X = data['prompt'].values
-y = data['correct'].values.astype(int)
+# Validate that both datasets have the same columns
+train_cols = set(train_df.columns)
+test_cols = set(test_df.columns)
+if train_cols != test_cols:
+    raise ValueError(f"Column mismatch between train and test datasets!\n"
+                     f"Train only: {train_cols - test_cols}\n"
+                     f"Test only: {test_cols - train_cols}")
+print(f"✓ Train and test datasets have matching columns")
 
-print(f"Total samples: {len(X)}")
-print(f"Positive samples: {sum(y)}, Negative samples: {len(y) - sum(y)}")
+# Validate required columns exist
+required_cols = {'prompt', 'correct'}
+if not required_cols.issubset(train_cols):
+    raise ValueError(f"Missing required columns: {required_cols - train_cols}")
+
+# Prepare train data
+X_train_val = train_df['prompt'].values
+y_train_val = train_df['correct'].values.astype(int)
+
+# Prepare test data
+X_test = test_df['prompt'].values
+y_test = test_df['correct'].values.astype(int)
+
+print(f"Total train+val samples: {len(X_train_val)}")
+print(f"Train+val positive: {sum(y_train_val)}, negative: {len(y_train_val) - sum(y_train_val)}")
+print(f"Test positive: {sum(y_test)}, negative: {len(y_test) - sum(y_test)}")
 
 # Log dataset statistics
 wandb.log({
-    'total_samples': len(X),
-    'positive_samples': int(sum(y)),
-    'negative_samples': int(len(y) - sum(y)),
-    'class_balance': sum(y) / len(y)
+    'total_samples': len(X_train_val) + len(X_test),
+    'train_val_samples': len(X_train_val),
+    'test_samples': len(X_test),
+    'positive_samples': int(sum(y_train_val)) + int(sum(y_test)),
+    'negative_samples': (len(y_train_val) - int(sum(y_train_val))) + (len(y_test) - int(sum(y_test))),
+    'class_balance': (int(sum(y_train_val)) + int(sum(y_test))) / (len(X_train_val) + len(X_test))
 })
 
-# Split data
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
-    test_size=config['test_size'],
-    random_state=config['random_state'],
-    stratify=y
-)
-
-# Further split train into train and validation
+# Split training data into train and validation
 X_train, X_val, y_train, y_val = train_test_split(
-    X_train, y_train,
+    X_train_val, y_train_val,
     test_size=0.1,
     random_state=config['random_state'],
-    stratify=y_train
+    stratify=y_train_val
 )
 
 print(f"Training samples: {len(X_train)}")
@@ -187,6 +201,22 @@ tokenizer.save_pretrained(model_path)
 print("\nEvaluating on test set...")
 test_results = trainer.evaluate(test_dataset)
 
+# Log test results to wandb
+wandb.log({
+    'test/loss': test_results.get('eval_loss', 0),
+    'test/accuracy': test_results.get('eval_accuracy', 0),
+    'test/precision': test_results.get('eval_precision', 0),
+    'test/recall': test_results.get('eval_recall', 0),
+    'test/f1': test_results.get('eval_f1', 0)
+})
+
+print(f"Test Results:")
+print(f"  Loss: {test_results.get('eval_loss', 0):.4f}")
+print(f"  Accuracy: {test_results.get('eval_accuracy', 0):.4f}")
+print(f"  Precision: {test_results.get('eval_precision', 0):.4f}")
+print(f"  Recall: {test_results.get('eval_recall', 0):.4f}")
+print(f"  F1: {test_results.get('eval_f1', 0):.4f}")
+
 # Get training history
 train_history = trainer.state.log_history
 
@@ -223,13 +253,13 @@ summary = {
         'weight_decay': config['weight_decay']
     },
     'dataset_statistics': {
-        'total_samples': len(X),
+        'total_samples': len(X_train_val) + len(X_test),
         'train_samples': len(X_train),
         'validation_samples': len(X_val),
         'test_samples': len(X_test),
-        'positive_samples': int(sum(y)),
-        'negative_samples': int(len(y) - sum(y)),
-        'class_balance': float(sum(y) / len(y))
+        'positive_samples': int(sum(y_train_val)) + int(sum(y_test)),
+        'negative_samples': (len(y_train_val) - int(sum(y_train_val))) + (len(y_test) - int(sum(y_test))),
+        'class_balance': float((int(sum(y_train_val)) + int(sum(y_test))) / (len(X_train_val) + len(X_test)))
     },
     'training_results': {
         'final_train_loss': float(final_train_metrics.get('loss', 0)) if final_train_metrics else None,
