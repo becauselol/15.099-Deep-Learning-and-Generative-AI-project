@@ -276,7 +276,7 @@ def main():
     )
     parser.add_argument(
         "--output-dir",
-        default="../sampling_experiments",
+        default="sampling_experiments",
         help="Directory (relative to project root) where samples and results will be stored.",
     )
     parser.add_argument(
