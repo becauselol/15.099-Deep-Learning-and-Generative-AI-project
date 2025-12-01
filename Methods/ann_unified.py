@@ -310,7 +310,7 @@ optimizer = optim.Adam(ann_model.parameters(), lr=config['ann_params']['learning
 
 # Training loop
 print("\nStarting training...")
-best_val_f1 = 0
+best_val_f1 = -1
 global_step = 0
 
 for epoch in range(config['ann_params']['num_epochs']):

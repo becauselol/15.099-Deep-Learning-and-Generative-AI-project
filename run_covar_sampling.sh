@@ -2,11 +2,11 @@
 #SBATCH -J covar_samp_5x0625
 #SBATCH -p pi_dbertsim
 #SBATCH --gres=gpu:l40s:1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=30:00:00
-#SBATCH -o covar_sampling_%j.out
-#SBATCH -e covar_sampling_%j.err
+#SBATCH -o logs/covar_sampling_%j.out
+#SBATCH -e logs/covar_sampling_%j.err
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
