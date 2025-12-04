@@ -70,3 +70,5 @@ wandb/
 *.bin
 *.safetensors
 *.pkl
+
+.DS_Store
