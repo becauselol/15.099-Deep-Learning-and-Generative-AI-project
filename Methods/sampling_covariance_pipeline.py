@@ -76,6 +76,159 @@ def diverse_sample_indices(
     return np.array(selected, dtype=int)
 
 
+def _spd_logdet(M: np.ndarray) -> float:
+    """
+    Compute log det(M) for a symmetric positive definite matrix M
+    using Cholesky factorization.
+    """
+    # Cholesky: M = L @ L.T, with L lower-triangular
+    L = np.linalg.cholesky(M)
+    return 2.0 * np.sum(np.log(np.diag(L)))
+
+
+def _d_optimal_core(
+    X: np.ndarray,
+    sample_size: int,
+    minimize: bool,
+    eps: float = 1e-6,
+) -> tuple[np.ndarray, float]:
+    """
+    Core greedy selector for (max or min) D-optimality.
+
+    Selects 'sample_size' rows from X (n x p) to approximately
+    maximize or minimize log det(X_S' X_S + eps I).
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (n, p)
+        Standardized feature matrix (rows = candidates).
+    sample_size : int
+        Number of points to select.
+    minimize : bool
+        If False: greedy MAX logdet (D-optimal).
+        If True:  greedy MIN logdet (most low-volume subset).
+    eps : float
+        Small ridge added to keep the information matrix PD:
+        M = X_S' X_S + eps I.
+
+    Returns
+    -------
+    indices : np.ndarray, shape (sample_size,)
+        Indices of selected rows.
+    logdet_value : float
+        log det(X_S' X_S + eps I) for the selected subset.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    n, p = X.shape
+
+    if sample_size <= 0:
+        raise ValueError("sample_size must be positive")
+    if sample_size >= n:
+        # Just return everything (order matters only up to permutation)
+        # logdet for this case can be computed if needed, but we keep it simple:
+        return np.arange(n, dtype=int), np.nan
+
+    # Start with M = eps I  =>  M^{-1} = (1/eps) I, logdet(M) = p * log(eps)
+    inv_M = (1.0 / eps) * np.eye(p, dtype=np.float64)
+    logdet_M = p * np.log(eps)
+
+    # Greedy build of the subset
+    selected: list[int] = []
+    remaining = list(range(n))
+
+    for _ in range(sample_size):
+        # For maximize: we want the candidate with largest log(1 + q)
+        # For minimize: we want the smallest log(1 + q)
+        if minimize:
+            best_score = np.inf
+        else:
+            best_score = -np.inf
+
+        best_idx = None
+        best_q = None
+        best_v = None
+
+        for i in remaining:
+            x = X[i, :]             # shape (p,)
+            # q = x^T M^{-1} x  (scalar)
+            v = inv_M @ x           # shape (p,)
+            q = float(x @ v)
+
+            # Increment in logdet using matrix determinant lemma:
+            # det(M + x x^T) = det(M) * (1 + q)
+            # => logdet_new = logdet_M + log(1 + q)
+            score = np.log(1.0 + q)
+
+            if minimize:
+                if score < best_score:
+                    best_score = score
+                    best_idx = i
+                    best_q = q
+                    best_v = v
+            else:
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+                    best_q = q
+                    best_v = v
+
+        # Update M^{-1} using Sherman–Morrison:
+        # (M + x x^T)^{-1} = M^{-1} - (M^{-1} x x^T M^{-1}) / (1 + q)
+        denom = 1.0 + best_q
+        outer = np.outer(best_v, best_v)
+        inv_M = inv_M - outer / denom
+
+        # Update logdet(M)
+        logdet_M = logdet_M + np.log(denom)
+
+        # Commit chosen index
+        selected.append(best_idx)
+        remaining.remove(best_idx)
+
+    return np.array(selected, dtype=int), float(logdet_M)
+
+
+def d_optimal_sample_indices_fast(
+    X: np.ndarray,
+    sample_size: int,
+    rng: np.random.RandomState,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """
+    Greedy D-optimal subset (max log det).
+
+    Returns only indices, to match the existing sampler interface.
+    """
+    # Optional: randomize candidate order for tie-breaking
+    n = X.shape[0]
+    perm = rng.permutation(n)
+    X_perm = X[perm, :]
+
+    idx_perm, _ = _d_optimal_core(X_perm, sample_size, minimize=False, eps=eps)
+    # Map back to original indices
+    return perm[idx_perm]
+
+
+def d_minvolume_sample_indices_fast(
+    X: np.ndarray,
+    sample_size: int,
+    rng: np.random.RandomState,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """
+    Greedy MIN-volume subset (min log det).
+
+    This picks points that make X_S' X_S as 'collapsed' as possible
+    (subject to the ridge eps).
+    """
+    n = X.shape[0]
+    perm = rng.permutation(n)
+    X_perm = X[perm, :]
+
+    idx_perm, _ = _d_optimal_core(X_perm, sample_size, minimize=True, eps=eps)
+    return perm[idx_perm]
+
+
 def run_xgboost(
     methods_dir: Path,
     output_dir: Path,
@@ -240,7 +393,7 @@ def main():
     )
     parser.add_argument(
         "--sampling-method",
-        choices=["random", "diverse"],
+        choices=["random", "diverse", "d_optimal", "d_minvolume"],
         default="diverse",
         help="Sampling heuristic for selecting training subsets.",
     )
@@ -377,8 +530,18 @@ def main():
 
         if args.sampling_method == "random":
             indices = rng.choice(n_train, size=sample_size, replace=False)
-        else:  # "diverse"
+
+        elif args.sampling_method == "diverse":
             indices = diverse_sample_indices(X_std, sample_size, rng)
+
+        elif args.sampling_method == "d_optimal":
+            indices = d_optimal_sample_indices_fast(X_std, sample_size, rng)
+
+        elif args.sampling_method == "d_minvolume":
+            indices = d_minvolume_sample_indices_fast(X_std, sample_size, rng)
+
+        else:
+            raise ValueError(f"Unknown sampling method: {args.sampling_method}")
 
         indices = np.sort(indices)
         X_sample = X_std[indices]
